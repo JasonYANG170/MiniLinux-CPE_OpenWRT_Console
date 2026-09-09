@@ -81,6 +81,18 @@ jobs:
           make download -j4
           find dl -type f -size -1024c -delete
 
+      - name: Build host tools and toolchain
+        run: |
+          cd "$BUILD_DIR"
+          mkdir -p logs
+          set -o pipefail
+          if ! make tools/install -j4 2>&1 | tee logs/tools-build.log; then
+            make tools/install -j1 V=s 2>&1 | tee logs/tools-build-verbose.log
+          fi
+          if ! make toolchain/install -j4 2>&1 | tee logs/toolchain-build.log; then
+            make toolchain/install -j1 V=s 2>&1 | tee logs/toolchain-build-verbose.log
+          fi
+
       - name: Build console package
         run: |
           cd "$BUILD_DIR"
