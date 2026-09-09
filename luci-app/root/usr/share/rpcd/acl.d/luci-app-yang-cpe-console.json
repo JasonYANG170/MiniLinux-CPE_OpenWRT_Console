@@ -1,0 +1,20 @@
+{
+	"luci-app-yang-cpe-console": {
+		"description": "Access MiniLinux-CPE status and controls",
+		"read": {
+			"uci": [ "ec200", "network", "wireless" ],
+			"file": {
+				"/usr/sbin/cpectl dashboard": [ "exec" ],
+				"/usr/sbin/cpectl ec200 status": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "ec200", "network" ],
+			"file": {
+				"/usr/sbin/cpectl fan *": [ "exec" ],
+				"/usr/sbin/cpectl ec200 apply": [ "exec" ],
+				"/usr/sbin/cpectl ec200 at *": [ "exec" ]
+			}
+		}
+	}
+}
