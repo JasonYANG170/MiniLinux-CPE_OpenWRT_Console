@@ -86,8 +86,12 @@ jobs:
           cd "$BUILD_DIR"
           mkdir -p logs
           set -o pipefail
-          make package/yang-cpe-console/compile package/luci-app-yang-cpe-console/compile -j4 \
-            2>&1 | tee logs/package-build.log
+          if ! make package/yang-cpe-console/compile package/luci-app-yang-cpe-console/compile -j4 \
+            2>&1 | tee logs/package-build.log; then
+            echo "Parallel build failed; retrying serially with verbose output."
+            make package/yang-cpe-console/compile package/luci-app-yang-cpe-console/compile \
+              -j1 V=s 2>&1 | tee logs/package-build-verbose.log
+          fi
 
       - name: Collect APK
         run: |
