@@ -1,0 +1,13 @@
+{
+	"admin/services/yang-cpe-console": {
+		"title": "MiniLinux CPE",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "yang-cpe-console/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-yang-cpe-console" ]
+		}
+	}
+}

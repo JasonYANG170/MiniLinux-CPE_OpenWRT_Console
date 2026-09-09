@@ -1,0 +1,383 @@
+#!/bin/sh
+
+VERSION="1.0.0"
+EC_SECTION="ec200.main"
+
+have() {
+	command -v "$1" >/dev/null 2>&1
+}
+
+line() {
+	printf '%s\n' "------------------------------------------------------------"
+}
+
+title() {
+	printf '\n%s\n' "$1"
+	line
+}
+
+uci_get() {
+	uci -q get "$EC_SECTION.$1" 2>/dev/null
+}
+
+uci_set() {
+	uci -q set "$EC_SECTION.$1=$2" && uci commit ec200
+}
+
+cpu_status() {
+	local load uptime_s freq temp zone raw
+	load="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+	uptime_s="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	freq="$(awk '/cpu MHz/ { print $4; exit }' /proc/cpuinfo 2>/dev/null)"
+	[ -n "$freq" ] || freq="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)"
+	case "$freq" in
+		*[!0-9.]*|'') : ;;
+		*) [ "${freq%.*}" -gt 10000 ] 2>/dev/null && freq="$(( ${freq%.*} / 1000 ))" ;;
+	esac
+	temp="N/A"
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -r "$zone/temp" ] || continue
+		raw="$(cat "$zone/temp")"
+		case "$raw" in
+			*[!0-9-]*|'') continue ;;
+		esac
+		if [ "$raw" -gt 1000 ]; then
+			temp="$((raw / 1000)).$(((raw % 1000) / 100)) C"
+		else
+			temp="$raw C"
+		fi
+		break
+	done
+	printf 'Uptime: %ss  Load: %s  CPU: %s MHz  Temp: %s\n' \
+		"${uptime_s:-N/A}" "${load:-N/A}" "${freq:-N/A}" "$temp"
+}
+
+memory_status() {
+	awk '
+		/^MemTotal:/ { total=$2 }
+		/^MemAvailable:/ { avail=$2 }
+		END {
+			used=total-avail;
+			if (total > 0)
+				printf "Memory: %.1f/%.1f MiB used (%.1f%%)\n", used/1024, total/1024, used*100/total;
+			else
+				print "Memory: N/A";
+		}' /proc/meminfo
+}
+
+disk_status() {
+	if have df; then
+		df -h 2>/dev/null | awk 'NR == 1 || $1 ~ /^\/dev\// { print }'
+	fi
+	if have block; then
+		block info 2>/dev/null
+	fi
+}
+
+fan_status() {
+	if have fanctl; then
+		fanctl status 2>/dev/null || printf 'Fan: unavailable\n'
+	else
+		printf 'Fan: fanctl is not installed\n'
+	fi
+}
+
+ethernet_status() {
+	local shown address
+	if have swconfig && swconfig list 2>/dev/null | grep -q 'switch0'; then
+		swconfig dev switch0 show 2>/dev/null | awk '
+			/^Port [0-4]:/ { port=$2; gsub(":", "", port) }
+			/^[[:space:]]*link:/ && port != "" {
+				sub(/^[[:space:]]*link:[[:space:]]*/, "");
+				printf "Port %s: %s\n", port, $0;
+				port="";
+			}'
+		shown=1
+	fi
+	[ -n "$shown" ] || ip link show eth0 2>/dev/null | sed -n '1,2p'
+	address="$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	printf 'LAN: %s\n' "${address:-no IPv4 address}"
+	address="$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	printf 'WAN: %s\n' "${address:-no IPv4 address}"
+}
+
+wireless_status() {
+	if have iwinfo; then
+		iwinfo 2>/dev/null | awk '/ESSID:|Access Point:|Channel:|Bit Rate:|Signal:|Noise:/ { print }'
+	else
+		printf 'Wireless: iwinfo is not installed\n'
+	fi
+}
+
+ec200_devices() {
+	local found node
+	found=0
+	for node in /dev/ttyUSB* /dev/cdc-wdm* /sys/class/net/wwan* /sys/class/net/usb*; do
+		[ -e "$node" ] || continue
+		printf '%s ' "${node##*/}"
+		found=1
+	done
+	[ "$found" -eq 1 ] && printf '\n' || printf 'none\n'
+}
+
+ec200_at() {
+	local port command response reader suffix
+	port="$(uci_get at_port)"
+	command="$1"
+	case "$port" in
+		/dev/ttyUSB*) suffix="${port#/dev/ttyUSB}" ;;
+		*) printf 'Invalid AT port: %s\n' "$port" >&2; return 1 ;;
+	esac
+	case "$suffix" in
+		''|*[!0-9]*) printf 'Invalid AT port: %s\n' "$port" >&2; return 1 ;;
+	esac
+	[ -c "$port" ] || { printf 'AT port not found: %s\n' "$port" >&2; return 1; }
+	case "$command" in
+		AT*) ;;
+		*) printf 'Only AT commands are accepted.\n' >&2; return 1 ;;
+	esac
+	if printf '%s' "$command" | grep -q '[[:cntrl:]]'; then
+		printf 'Control characters are not allowed.\n' >&2
+		return 1
+	fi
+	response="/tmp/cpectl-at.$$"
+	trap 'rm -f "$response"' EXIT INT TERM
+	stty -F "$port" 115200 raw -echo -echoe -echok 2>/dev/null || true
+	cat "$port" >"$response" 2>/dev/null &
+	reader=$!
+	sleep 1
+	printf '%s\r' "$command" >"$port"
+	sleep 3
+	kill "$reader" 2>/dev/null || true
+	wait "$reader" 2>/dev/null || true
+	tr -d '\r' <"$response"
+	rm -f "$response"
+	trap - EXIT INT TERM
+}
+
+ec200_status() {
+	local data proto iface
+	title "EC200"
+	printf 'USB: '
+	if have lsusb; then
+		lsusb 2>/dev/null | grep -iE '2c7c|quectel' || printf 'Quectel USB ID not found\n'
+	else
+		printf 'lsusb unavailable\n'
+	fi
+	printf 'Devices: '
+	ec200_devices
+	proto="$(uci_get proto)"
+	data="$(uci_get data_device)"
+	iface="$(uci_get interface)"
+	printf 'Protocol: %s  Data: %s  Interface: %s\n' "${proto:-N/A}" "${data:-N/A}" "${iface:-N/A}"
+	printf 'APN: %s  PDP: %s  Mode: %s\n' "$(uci_get apn)" "$(uci_get pdptype)" "$(uci_get network_mode)"
+	if [ -c "$data" ]; then
+		case "$proto" in
+			qmi)
+			uqmi -d "$data" --get-signal-info 2>/dev/null || true
+			uqmi -d "$data" --get-serving-system 2>/dev/null || true
+			uqmi -d "$data" --get-data-status 2>/dev/null || true
+			;;
+			mbim)
+				umbim -d "$data" status 2>/dev/null || true
+				umbim -d "$data" subscriber 2>/dev/null || true
+			;;
+		esac
+	fi
+	if [ -c "$(uci_get at_port)" ]; then
+		ec200_at 'ATI' || true
+		ec200_at 'AT+CPIN?' || true
+		ec200_at 'AT+CSQ' || true
+		ec200_at 'AT+CEREG?' || true
+		ec200_at 'AT+QNWINFO' || true
+	fi
+}
+
+valid_key_value() {
+	local key value suffix
+	key="$1"
+	value="$2"
+	case "$key" in
+		proto) case "$value" in qmi|mbim|ncm) return 0;; esac ;;
+		pdptype) case "$value" in ipv4|ipv6|ipv4v6) return 0;; esac ;;
+		auth) case "$value" in none|pap|chap|both) return 0;; esac ;;
+		network_mode) case "$value" in auto|gsm|lte) return 0;; esac ;;
+		at_port)
+			case "$value" in /dev/ttyUSB*) suffix="${value#/dev/ttyUSB}";; *) suffix='';; esac
+			case "$suffix" in ''|*[!0-9]*) :;; *) return 0;; esac
+			;;
+		data_device)
+			case "$value" in /dev/cdc-wdm*) suffix="${value#/dev/cdc-wdm}";; *) suffix='';; esac
+			case "$suffix" in ''|*[!0-9]*) :;; *) return 0;; esac
+			;;
+		interface) case "$value" in *[!A-Za-z0-9_-]*|'') :;; *) return 0;; esac ;;
+		pin) case "$value" in ''|[0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) return 0;; esac ;;
+		apn|username|password) case "$value" in *[!A-Za-z0-9_.@-]*) :;; *) return 0;; esac ;;
+	esac
+	printf 'Invalid value for %s\n' "$key" >&2
+	return 1
+}
+
+ec200_set() {
+	[ "$#" -eq 2 ] || { printf 'Usage: cpectl ec200 set KEY VALUE\n' >&2; return 1; }
+	valid_key_value "$1" "$2" || return 1
+	uci_set "$1" "$2"
+	printf '%s updated.\n' "$1"
+}
+
+ec200_apply_mode() {
+	case "$(uci_get network_mode)" in
+		auto) ec200_at 'AT+QCFG="nwscanmode",0,1' ;;
+		gsm) ec200_at 'AT+QCFG="nwscanmode",1,1' ;;
+		lte) ec200_at 'AT+QCFG="nwscanmode",3,1' ;;
+	esac
+}
+
+ec200_apply() {
+	local iface proto device apn pin pdptype auth username password
+	iface="$(uci_get interface)"
+	proto="$(uci_get proto)"
+	device="$(uci_get data_device)"
+	[ "$proto" = ncm ] && device="$(uci_get at_port)"
+	apn="$(uci_get apn)"
+	pin="$(uci_get pin)"
+	pdptype="$(uci_get pdptype)"
+	auth="$(uci_get auth)"
+	username="$(uci_get username)"
+	password="$(uci_get password)"
+	valid_key_value interface "$iface" || return 1
+	valid_key_value proto "$proto" || return 1
+	valid_key_value at_port "$(uci_get at_port)" || return 1
+	valid_key_value data_device "$(uci_get data_device)" || return 1
+	valid_key_value apn "$apn" || return 1
+	valid_key_value pin "$pin" || return 1
+	valid_key_value pdptype "$pdptype" || return 1
+	valid_key_value auth "$auth" || return 1
+	valid_key_value username "$username" || return 1
+	valid_key_value password "$password" || return 1
+	valid_key_value network_mode "$(uci_get network_mode)" || return 1
+	uci -q set "network.$iface=interface"
+	uci -q set "network.$iface.proto=$proto"
+	uci -q set "network.$iface.device=$device"
+	uci -q set "network.$iface.apn=$apn"
+	uci -q set "network.$iface.pdptype=$pdptype"
+	uci -q set "network.$iface.auth=$auth"
+	if [ -n "$pin" ]; then uci -q set "network.$iface.pincode=$pin"; else uci -q delete "network.$iface.pincode"; fi
+	if [ -n "$username" ]; then uci -q set "network.$iface.username=$username"; else uci -q delete "network.$iface.username"; fi
+	if [ -n "$password" ]; then uci -q set "network.$iface.password=$password"; else uci -q delete "network.$iface.password"; fi
+	uci commit network
+	ec200_apply_mode || true
+	ifdown "$iface" 2>/dev/null || true
+	ifup "$iface" 2>/dev/null || true
+	printf 'EC200 network interface %s applied.\n' "$iface"
+}
+
+dashboard() {
+	[ -t 1 ] && printf '\033[2J\033[H' 2>/dev/null || true
+	printf 'YANG-RouterOS / MiniLinux-CPE Console v%s\n' "$VERSION"
+	line
+	cpu_status
+	memory_status
+	fan_status
+	title "Storage"
+	disk_status
+	title "Ethernet"
+	ethernet_status
+	title "Wireless"
+	wireless_status
+	printf '\nEC200 devices: '
+	ec200_devices
+}
+
+prompt_value() {
+	local key current value
+	key="$1"
+	current="$(uci_get "$key")"
+	printf '%s [%s]: ' "$key" "$current"
+	IFS= read -r value
+	[ -n "$value" ] || return 0
+	ec200_set "$key" "$value"
+}
+
+ec200_wizard() {
+	prompt_value proto
+	prompt_value at_port
+	prompt_value data_device
+	prompt_value apn
+	prompt_value pin
+	prompt_value pdptype
+	prompt_value auth
+	prompt_value username
+	prompt_value password
+	prompt_value network_mode
+	printf 'Apply and reconnect now? [y/N]: '
+	IFS= read -r answer
+	case "$answer" in y|Y) ec200_apply;; esac
+}
+
+interactive() {
+	local choice value command
+	while :; do
+		dashboard
+		printf '\n1) Set fan PWM (0-255)\n'
+		printf '2) EC200 detailed status\n'
+		printf '3) Configure EC200\n'
+		printf '4) Send EC200 AT command\n'
+		printf '5) Refresh\n'
+		printf '0) Exit\n'
+		printf '> '
+		IFS= read -r choice || return 0
+		case "$choice" in
+			1) printf 'PWM [0-255]: '; IFS= read -r value; fanctl "$value" ;;
+			2) ec200_status ;;
+			3) ec200_wizard ;;
+			4) printf 'AT command: '; IFS= read -r command; ec200_at "$command" ;;
+			5) continue ;;
+			0) return 0 ;;
+			*) printf 'Unknown selection.\n' ;;
+		esac
+		printf '\nPress Enter to continue...'
+		IFS= read -r _
+	done
+}
+
+usage() {
+	cat <<'EOF'
+Usage:
+  cpectl                         Interactive console
+  cpectl dashboard               System overview
+  cpectl fan STATUS|0..255       Read or set fan PWM
+  cpectl disks|cpu|memory|ports|wifi
+  cpectl ec200 status
+  cpectl ec200 at 'AT+CSQ'
+  cpectl ec200 set KEY VALUE
+  cpectl ec200 apply
+
+EC200 keys: proto, at_port, data_device, interface, apn, pin, pdptype,
+            auth, username, password, network_mode
+EOF
+}
+
+case "${1:-}" in
+	'') interactive ;;
+	dashboard|status) dashboard ;;
+	fan)
+		case "${2:-status}" in status) fan_status;; *) fanctl "$2";; esac
+		;;
+	disks|disk) disk_status ;;
+	cpu) cpu_status ;;
+	memory|mem) memory_status ;;
+	ports|ethernet) ethernet_status ;;
+	wifi|wireless) wireless_status ;;
+	ec200)
+		case "${2:-status}" in
+			status) ec200_status ;;
+			at) shift 2; [ "$#" -gt 0 ] || { usage; exit 1; }; ec200_at "$*" ;;
+			set) ec200_set "${3:-}" "${4:-}" ;;
+			apply) ec200_apply ;;
+			*) usage; exit 1 ;;
+		esac
+		;;
+	-h|--help|help) usage ;;
+	*) usage; exit 1 ;;
+esac
