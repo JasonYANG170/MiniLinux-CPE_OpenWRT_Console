@@ -35,7 +35,8 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f -name '*.list' -delete
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -iname '*google*' -o -iname '*microsoft*' \) -delete
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gawk gcc-multilib \
