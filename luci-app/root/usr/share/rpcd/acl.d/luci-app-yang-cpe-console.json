@@ -4,6 +4,7 @@
 		"read": {
 			"uci": [ "ec200", "network", "wireless" ],
 			"file": {
+				"/usr/sbin/cpectl metrics": [ "exec" ],
 				"/usr/sbin/cpectl dashboard": [ "exec" ],
 				"/usr/sbin/cpectl ec200 status": [ "exec" ]
 			}
