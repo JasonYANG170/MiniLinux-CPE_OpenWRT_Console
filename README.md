@@ -8,6 +8,8 @@ Python、Node.js 或 ncurses。
 ## 功能
 
 - 在 LuCI 的“服务 → MiniLinux CPE”页面查看状态并完成配置。
+- 数据看板提供 CPU、内存、存储、风扇、Wi-Fi、网口圆形码表。
+- 每 3 秒采样并绘制 CPU/内存趋势与 LAN/4G 实时流量曲线。
 - 使用网页滑块设置 GPIO46 风扇 PWM，范围为 0–255。
 - 显示 CPU 频率、负载、温度和运行时间。
 - 显示内存、磁盘/TF 卡、USB 存储状态。
@@ -41,11 +43,11 @@ UCI 网络接口并重新连接，远程操作时可能暂时断网。
 ## 安装
 
 ImmortalWrt 25.12 已改用 APK 包格式，不能安装传统 IPK。到仓库的
-**Actions** 页面下载 `luci-app-yang-cpe-console-1.0.0-ramips-mt76x8`
+**Actions** 页面下载 `luci-app-yang-cpe-console-1.1.0-ramips-mt76x8`
 artifact，把其中两个 APK 上传到设备后执行：
 
 ```sh
-apk add --allow-untrusted /tmp/yang-cpe-console-1.0.0-r1.apk
+apk add --allow-untrusted /tmp/yang-cpe-console-1.1.0-r1.apk
 apk add --allow-untrusted /tmp/luci-app-yang-cpe-console-*.apk
 ```
 
