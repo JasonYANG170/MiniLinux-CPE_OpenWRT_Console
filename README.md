@@ -1,3 +1,5 @@
+[简体中文](README.md) | [English](README_en.md)
+
 # MiniLinux-CPE OpenWRT Console
 
 `yang-cpe-console` 是为 MiniLinux-CPE（MT7628、ImmortalWrt 25.12、
