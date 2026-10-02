@@ -5,6 +5,14 @@ Linux 6.12）制作的设备控制软件。项目同时提供现代 LuCI 图形�
 串口/SSH 命令行；后端只使用 BusyBox/ash 和 OpenWrt 原生工具，不依赖
 Python、Node.js 或 ncurses。
 
+## 配套硬件
+
+![Mini-LinuxCPE MT7628 与 EC200 路由器实物](docs/images/project-hardware.webp)
+
+图片展示本控制台配套的 Mini-LinuxCPE 路由器实物。
+
+[硬件项目与图片来源](https://oshwhub.com/jasonyang17/project_bkczwwfp)
+
 ## 功能
 
 - 在 LuCI 的“服务 → MiniLinux CPE”页面查看状态并完成配置。
